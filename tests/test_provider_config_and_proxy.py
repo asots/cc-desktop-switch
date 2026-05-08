@@ -1974,7 +1974,7 @@ class AdminApiTests(unittest.TestCase):
 
 
 class ReleaseManifestTests(unittest.TestCase):
-    VERSION = "1.0.20"
+    VERSION = "1.0.21"
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

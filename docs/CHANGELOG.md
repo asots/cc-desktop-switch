@@ -7,6 +7,16 @@
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
+## v1.0.21
+
+Release notes: [docs/release-notes-v1.0.21.md](release-notes-v1.0.21.md)
+
+- Fixed macOS fresh-environment writes by creating a `configLibrary` entry when none exists.
+- Added Intel macOS x64 release assets alongside Windows x64 and macOS arm64.
+- Added safe custom Claude route mappings that expose only `claude-*` model names to Claude Desktop.
+- Fixed Windows in-app update installs so the downloaded installer opens visibly.
+- Kept #7, #9, and #10 open for follow-up; this patch release does not claim those issues are fixed.
+
 ## v1.0.20
 
 Release notes: [docs/release-notes-v1.0.20.md](release-notes-v1.0.20.md)
