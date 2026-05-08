@@ -1900,7 +1900,11 @@ class AdminApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["installerStarted"])
-        popen.assert_called_once_with([r"C:\Temp\CC-Desktop-Switch-v1.0.11-Windows-Setup.exe"], detached=True)
+        popen.assert_called_once_with(
+            [r"C:\Temp\CC-Desktop-Switch-v1.0.11-Windows-Setup.exe"],
+            detached=True,
+            show_window=True,
+        )
 
     def test_update_install_opens_downloaded_macos_package(self):
         async def fake_download_update(url, current_version, platform="windows-x64", target_dir=None):
