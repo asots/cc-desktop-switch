@@ -63,7 +63,7 @@ def verify_admin_token(value: str) -> bool:
     return bool(value) and secrets.compare_digest(str(value), _admin_token)
 
 
-def _popen_hidden(command: list[str], *, detached: bool = False):
+def _popen_hidden(command: list[str], *, detached: bool = False, show_window: bool = False):
     """启动外部程序时避免 Windows 弹出黑色终端窗口。"""
     kwargs = {"close_fds": True}
     if detached:
@@ -71,10 +71,12 @@ def _popen_hidden(command: list[str], *, detached: bool = False):
         kwargs["stdout"] = subprocess.DEVNULL
         kwargs["stderr"] = subprocess.DEVNULL
     if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        kwargs["startupinfo"] = startupinfo
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        creationflags = 0
+        if not show_window:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            kwargs["startupinfo"] = startupinfo
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if detached:
             creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
             creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -137,7 +139,10 @@ def _launch_update_installer(installer_path: str, platform: str) -> bool:
         return _schedule_update_quit_for_install(quit_handler)
 
     command = updater.install_command(installer_path, platform)
-    _popen_hidden(command, detached=True)
+    if platform.startswith("windows-"):
+        _popen_hidden(command, detached=True, show_window=True)
+    else:
+        _popen_hidden(command, detached=True)
     return False
 
 
