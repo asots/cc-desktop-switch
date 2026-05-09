@@ -627,6 +627,73 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertTrue(health["oneMillionReady"])
         self.assertNotIn("one_million_not_written", codes)
 
+    def test_macos_config_library_1m_status_does_not_warn_when_other_sources_are_stale(self):
+        provider = {
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {
+                "default": "deepseek-v4-pro[1m]",
+                "opus": "deepseek-v4-pro[1m]",
+                "sonnet": "deepseek-v4-pro[1m]",
+                "haiku": "deepseek-v4-flash",
+            },
+            "modelCapabilities": {
+                "deepseek-v4-pro[1m]": {"supports1m": True},
+                "deepseek-v4-flash": {"supports1m": True},
+            },
+        }
+        json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
+        library_dir = os.path.join(os.path.dirname(json_path), "configLibrary")
+        entry_id = "1b050dc2-874f-4096-a303-566f42c64bcb"
+        os.makedirs(library_dir, exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "deploymentMode": "3p",
+                "enterpriseConfig": {
+                    "inferenceProvider": "gateway",
+                    "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                    "inferenceGatewayApiKey": "json-secret",
+                    "inferenceModels": ["sonnet", "haiku", "opus"],
+                    "coworkEgressAllowedHosts": ["*"],
+                },
+            }, handle)
+        with open(os.path.join(library_dir, "_meta.json"), "w", encoding="utf-8") as handle:
+            json.dump({"appliedId": entry_id}, handle)
+        with open(os.path.join(library_dir, f"{entry_id}.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "inferenceProvider": "gateway",
+                "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                "inferenceGatewayApiKey": "library-secret",
+                "inferenceGatewayAuthScheme": "bearer",
+                "inferenceModels": json.loads(registry.serialize_inference_models(provider)),
+                "coworkEgressAllowedHosts": ["*"],
+            }, handle)
+
+        with patch.object(registry, "MAC_3P_CONFIG", json_path):
+            with patch("backend.registry._mac_get_plist_config_status", return_value={
+                "configured": True,
+                "keys": {
+                    "inferenceProvider": "gateway",
+                    "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                    "inferenceGatewayApiKey": "******",
+                    "inferenceGatewayAuthScheme": "bearer",
+                    "inferenceModels": '["sonnet","haiku","opus"]',
+                    "coworkEgressAllowedHosts": '["*"]',
+                },
+                "message": "",
+            }):
+                status = registry._mac_get_config_status()
+
+        health = _desktop_health(status, 18080, provider)
+        codes = {issue["code"] for issue in health["issues"]}
+
+        self.assertEqual(status["activeSource"], "configLibrary")
+        self.assertEqual(status["keySources"]["inferenceModels"], "configLibrary")
+        self.assertFalse(health["needsApply"])
+        self.assertTrue(health["oneMillionReady"])
+        self.assertNotIn("one_million_not_written", codes)
+
     def test_macos_clear_config_clears_json_without_touching_preferences(self):
         json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
