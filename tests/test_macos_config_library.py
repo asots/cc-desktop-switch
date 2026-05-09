@@ -36,8 +36,12 @@ class MacosConfigLibraryTests(unittest.TestCase):
         self.assertEqual(saved["inferenceGatewayApiKey"], "secret-value")
         self.assertEqual(saved["inferenceGatewayAuthScheme"], "x-api-key")
         self.assertEqual(saved["inferenceGatewayHeaders"], ["x-api-key: secret-value"])
-        self.assertEqual(saved["inferenceModels"], ["model-a", "model-b"])
+        self.assertEqual(saved["inferenceModels"], [
+            {"name": "model-a", "displayName": "Model A"},
+            {"name": "model-b", "supports1m": True},
+        ])
         self.assertIs(saved["isClaudeCodeForDesktopEnabled"], True)
+        self.assertEqual(saved["coworkEgressAllowedHosts"], ["*"])
 
 
 if __name__ == "__main__":

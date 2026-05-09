@@ -54,6 +54,11 @@ CLAUDE_ID_TO_SLOT = {
     for slot in MODEL_SLOTS
     for claude_id in slot["claude_ids"]
 }
+INTERNAL_CLAUDE_ID_TO_SLOT = {
+    # Claude Desktop / Code WebFetch can request the dated Haiku ID even when
+    # the picker only shows the stable claude-haiku-4-5 route.
+    "claude-haiku-4-5-20251001": "haiku_4_5",
+}
 DESKTOP_ROUTE_IDS = tuple(
     claude_id
     for slot in MODEL_SLOTS
@@ -279,6 +284,9 @@ def resolve_requested_model_slot(requested_model: str) -> Optional[str]:
     if not requested:
         return None
     mapped = CLAUDE_ID_TO_SLOT.get(requested)
+    if mapped:
+        return mapped
+    mapped = INTERNAL_CLAUDE_ID_TO_SLOT.get(requested)
     if mapped:
         return mapped
 

@@ -342,6 +342,20 @@ def _parse_inference_models(raw_value: str) -> list:
     return parsed if isinstance(parsed, list) else []
 
 
+def _parse_policy_list(value) -> list[str]:
+    """解析 Desktop JSON string / JSON array 类型的 policy 列表。"""
+    if isinstance(value, list):
+        parsed = value
+    else:
+        try:
+            parsed = json.loads(str(value or "[]"))
+        except (TypeError, ValueError):
+            parsed = []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item or "").strip()]
+
+
 def _inference_model_names(items: list) -> list[str]:
     """提取 Desktop inferenceModels 里的模型名称。"""
     names = []
@@ -466,6 +480,13 @@ def _desktop_health(
                 "code": "desktop_not_configured",
                 "message": "桌面版尚未配置，请添加提供商并一键应用到 Claude 桌面版。",
             })
+
+    cowork_egress_hosts = _parse_policy_list(keys.get("coworkEgressAllowedHosts"))
+    if keys and "*" not in cowork_egress_hosts:
+        issues.append({
+            "code": "cowork_egress_hosts_missing",
+            "message": "Claude Cowork 网页访问放行规则尚未写入，请重新一键应用并重启 Claude 桌面版。",
+        })
 
     inference_models = _parse_inference_models(str(keys.get("inferenceModels") or ""))
     inference_model_names = _inference_model_names(inference_models)
@@ -745,7 +766,7 @@ async def _detect_local_proxy() -> Optional[str]:
 
 def create_admin_app() -> FastAPI:
     """创建管理后台 FastAPI 应用"""
-    app = FastAPI(title="CC Desktop Switch Admin", version="1.0.21")
+    app = FastAPI(title="CC Desktop Switch Admin", version="1.0.22")
 
     @app.middleware("http")
     async def require_local_admin_auth(request: Request, call_next):

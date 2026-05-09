@@ -7,6 +7,16 @@
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
+## v1.0.22
+
+Release notes: [docs/release-notes-v1.0.22.md](release-notes-v1.0.22.md)
+
+- Added `coworkEgressAllowedHosts` to Claude Desktop policy writes so Cowork/WebFetch can access external hosts after applying the local gateway config.
+- Accepted Claude's dated Haiku route `claude-haiku-4-5-20251001` as an internal alias for the mapped Haiku slot.
+- Preserved macOS `supports1m` metadata in JSON and `configLibrary` writes so DeepSeek 1M health checks can pass after re-applying.
+- Avoided injecting DeepSeek Max request options into non-official DeepSeek-like relays such as OpenCode/one-api/new-api endpoints.
+- Kept #7, #18, and #19 as support/diagnostics follow-ups; no issue replies or GitHub release are sent without maintainer approval.
+
 ## v1.0.21
 
 Release notes: [docs/release-notes-v1.0.21.md](release-notes-v1.0.21.md)

@@ -10,6 +10,11 @@ on:
         description: "Release version without v prefix, for example 1.0.20"
         required: true
         type: string
+      dry_run:
+        description: "Build and verify assets without creating a tag or publishing a release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -25,6 +30,8 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
+      dry_run: ${{ steps.release.outputs.dry_run }}
+      checkout_ref: ${{ steps.release.outputs.checkout_ref }}
 
     steps:
       - name: Checkout
@@ -51,9 +58,16 @@ jobs:
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          dry_run="${{ github.event.inputs.dry_run || 'false' }}"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+          if [[ "$dry_run" == "true" ]]; then
+            echo "checkout_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=v$version" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Ensure release tag for manual run
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && steps.release.outputs.dry_run != 'true'
         shell: bash
         run: |
           tag="${{ steps.release.outputs.tag }}"
@@ -82,7 +96,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -155,7 +169,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -240,7 +254,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -329,7 +343,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
 
       - name: Download release artifacts
         uses: actions/download-artifact@v4
@@ -381,6 +395,7 @@ jobs:
           }
 
       - name: Publish GitHub Release
+        if: needs.prepare.outputs.dry_run != 'true'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -440,3 +455,12 @@ jobs:
 
           Invoke-Gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
           Invoke-Gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest --verify-tag
+
+      - name: Upload dry-run release staging
+        if: needs.prepare.outputs.dry_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-complete
+          path: release-staging/*
+          if-no-files-found: error
+          retention-days: 7

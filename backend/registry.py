@@ -13,6 +13,7 @@ from backend.model_alias import all_provider_model_entries, desktop_model_entrie
 
 REGISTRY_PATH = r"SOFTWARE\Policies\Claude"
 CCDS_MARKER = "ccds_managed"
+COWORK_EGRESS_ALLOWED_HOSTS = '["*"]'
 
 # 预期的配置项（名称 → 默认值, 值类型）
 DESKTOP_CONFIG = {
@@ -23,6 +24,7 @@ DESKTOP_CONFIG = {
     "inferenceModels": ("[]", str),
     "inferenceGatewayBaseUrl": ("http://127.0.0.1:18080", str),
     "isClaudeCodeForDesktopEnabled": (1, int),
+    "coworkEgressAllowedHosts": (COWORK_EGRESS_ALLOWED_HOSTS, str),
 }
 
 # ── 辅助函数 ──
@@ -220,6 +222,7 @@ $gatewayApiKey = DecodeUtf8 '{_b64_utf8(gateway_api_key)}'
 $inferenceModels = DecodeUtf8 '{_b64_utf8(inference_models or DESKTOP_CONFIG["inferenceModels"][0])}'
 $authScheme = DecodeUtf8 '{_b64_utf8(auth_scheme or "bearer")}'
 $gatewayHeaders = DecodeUtf8 '{_b64_utf8(gateway_headers or "[]")}'
+$coworkEgressAllowedHosts = DecodeUtf8 '{_b64_utf8(COWORK_EGRESS_ALLOWED_HOSTS)}'
 New-ItemProperty -LiteralPath $path -Name 'inferenceProvider' -Value 'gateway' -PropertyType String -Force | Out-Null
 New-ItemProperty -LiteralPath $path -Name 'inferenceGatewayBaseUrl' -Value $baseUrl -PropertyType String -Force | Out-Null
 New-ItemProperty -LiteralPath $path -Name 'inferenceGatewayApiKey' -Value $gatewayApiKey -PropertyType String -Force | Out-Null
@@ -227,6 +230,7 @@ New-ItemProperty -LiteralPath $path -Name 'inferenceGatewayAuthScheme' -Value $a
 New-ItemProperty -LiteralPath $path -Name 'inferenceGatewayHeaders' -Value $gatewayHeaders -PropertyType String -Force | Out-Null
 New-ItemProperty -LiteralPath $path -Name 'inferenceModels' -Value $inferenceModels -PropertyType String -Force | Out-Null
 New-ItemProperty -LiteralPath $path -Name 'isClaudeCodeForDesktopEnabled' -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -LiteralPath $path -Name 'coworkEgressAllowedHosts' -Value $coworkEgressAllowedHosts -PropertyType String -Force | Out-Null
 New-ItemProperty -LiteralPath $path -Name '{CCDS_MARKER}' -Value 'true' -PropertyType String -Force | Out-Null
 """
     ok, output = _run_elevated_powershell(script)
@@ -280,6 +284,7 @@ def _win_apply_config(
             "inferenceGatewayHeaders": (gateway_headers or "[]", winreg.REG_SZ),
             "inferenceModels": (inference_models, winreg.REG_SZ),
             "isClaudeCodeForDesktopEnabled": (1, winreg.REG_DWORD),
+            "coworkEgressAllowedHosts": (COWORK_EGRESS_ALLOWED_HOSTS, winreg.REG_SZ),
             CCDS_MARKER: ("true", winreg.REG_SZ),
         }
         for name, (value, type_) in values.items():
@@ -472,21 +477,44 @@ def _mac_write_json_config(data: dict) -> tuple[bool, str]:
     return _mac_write_json_file(_mac_config_json_path(), data)
 
 
-def _mac_json_model_names(inference_models: str) -> list[str]:
+def _mac_json_inference_models(inference_models: str) -> list:
     try:
         parsed = json.loads(inference_models or DESKTOP_CONFIG["inferenceModels"][0])
     except (TypeError, ValueError):
         parsed = []
     result = []
+    seen = set()
     if isinstance(parsed, list):
         for item in parsed:
             if isinstance(item, dict):
                 model_name = str(item.get("name") or "").strip()
+                if not model_name or model_name in seen:
+                    continue
+                seen.add(model_name)
+                cleaned = {"name": model_name}
+                display_name = str(item.get("displayName") or "").strip()
+                if display_name:
+                    cleaned["displayName"] = display_name
+                if item.get("supports1m") is True:
+                    cleaned["supports1m"] = True
+                result.append(cleaned)
             else:
                 model_name = str(item or "").strip()
-            if model_name and model_name not in result:
+                if not model_name or model_name in seen:
+                    continue
+                seen.add(model_name)
                 result.append(model_name)
     return result or ["sonnet", "haiku", "opus"]
+
+
+def _mac_json_policy_list(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        parsed = []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item or "").strip()]
 
 
 def _mac_json_gateway_headers(gateway_headers: str) -> list[str]:
@@ -514,8 +542,9 @@ def _mac_json_enterprise_config(
         "inferenceGatewayApiKey": gateway_api_key,
         "inferenceGatewayAuthScheme": auth_scheme or DESKTOP_CONFIG["inferenceGatewayAuthScheme"][0],
         "inferenceGatewayHeaders": _mac_json_gateway_headers(gateway_headers),
-        "inferenceModels": _mac_json_model_names(inference_models),
+        "inferenceModels": _mac_json_inference_models(inference_models),
         "isClaudeCodeForDesktopEnabled": True,
+        "coworkEgressAllowedHosts": _mac_json_policy_list(COWORK_EGRESS_ALLOWED_HOSTS),
     }
 
 
@@ -528,6 +557,8 @@ def _mac_json_status_keys(enterprise_config: dict) -> dict:
         if name == "inferenceModels" and isinstance(value, list):
             value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         if name == "inferenceGatewayHeaders" and isinstance(value, list):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if name == "coworkEgressAllowedHosts" and isinstance(value, list):
             value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         if name == "isClaudeCodeForDesktopEnabled" and isinstance(value, bool):
             value = int(value)

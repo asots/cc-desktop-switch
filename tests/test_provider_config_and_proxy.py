@@ -432,8 +432,12 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(saved["enterpriseConfig"]["inferenceGatewayApiKey"], "secret-value")
         self.assertEqual(saved["enterpriseConfig"]["inferenceGatewayAuthScheme"], "x-api-key")
         self.assertEqual(saved["enterpriseConfig"]["inferenceGatewayHeaders"], ["x-api-key: secret-value"])
-        self.assertEqual(saved["enterpriseConfig"]["inferenceModels"], ["model-a", "model-b"])
+        self.assertEqual(saved["enterpriseConfig"]["inferenceModels"], [
+            {"name": "model-a", "displayName": "Model A"},
+            {"name": "model-b", "supports1m": True},
+        ])
         self.assertIs(saved["enterpriseConfig"]["isClaudeCodeForDesktopEnabled"], True)
+        self.assertEqual(saved["enterpriseConfig"]["coworkEgressAllowedHosts"], ["*"])
 
     def test_macos_apply_config_writes_active_config_library_entry(self):
         json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
@@ -472,8 +476,12 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(saved["inferenceGatewayApiKey"], "secret-value")
         self.assertEqual(saved["inferenceGatewayAuthScheme"], "x-api-key")
         self.assertEqual(saved["inferenceGatewayHeaders"], ["x-api-key: secret-value"])
-        self.assertEqual(saved["inferenceModels"], ["model-a", "model-b"])
+        self.assertEqual(saved["inferenceModels"], [
+            {"name": "model-a", "displayName": "Model A"},
+            {"name": "model-b", "supports1m": True},
+        ])
         self.assertIs(saved["isClaudeCodeForDesktopEnabled"], True)
+        self.assertEqual(saved["coworkEgressAllowedHosts"], ["*"])
 
     def test_macos_status_prefers_json_runtime_values_and_keeps_plist_models(self):
         json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
@@ -610,6 +618,7 @@ class ProviderConfigTests(unittest.TestCase):
                 "inferenceGatewayAuthScheme": "bearer",
                 "inferenceGatewayHeaders": ["x-api-key: secret-value"],
                 "inferenceModels": ["model-a"],
+                "coworkEgressAllowedHosts": ["*"],
                 "note": "keep me",
             }, handle)
 
@@ -660,6 +669,7 @@ class ProviderConfigTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertNotIn("plain-gateway-key", captured["script"])
+        self.assertIn("coworkEgressAllowedHosts", captured["script"])
         self.assertIn("FromBase64String", captured["script"])
         self.assertNotIn(r"HKCU:\SOFTWARE\Policies\Claude", captured["script"])
 
@@ -693,6 +703,7 @@ class ProviderConfigTests(unittest.TestCase):
             "inferenceGatewayHeaders",
             "inferenceModels",
             "isClaudeCodeForDesktopEnabled",
+            "coworkEgressAllowedHosts",
             "ccds_managed",
             "unrelatedPreference",
         ]
@@ -707,6 +718,7 @@ class ProviderConfigTests(unittest.TestCase):
                 "inferenceGatewayHeaders",
                 "inferenceModels",
                 "isClaudeCodeForDesktopEnabled",
+                "coworkEgressAllowedHosts",
                 "ccds_managed",
             ],
         )
@@ -764,6 +776,7 @@ class ProviderConfigTests(unittest.TestCase):
                     self.assertEqual(map_model("claude-sonnet-4-6", preset), models["sonnet"])
                 if "claude-haiku-4-5" in desktop_ids:
                     self.assertEqual(map_model("claude-haiku-4-5", preset), models["haiku"])
+                    self.assertEqual(map_model("claude-haiku-4-5-20251001", preset), models["haiku"])
                 if "claude-opus-4-7" in desktop_ids:
                     self.assertEqual(map_model("claude-opus-4-7", preset), models["opus"])
 
@@ -789,6 +802,10 @@ class ProviderConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             map_model("claude-haiku-4-5", deepseek_1m_provider),
+            "deepseek-v4-flash",
+        )
+        self.assertEqual(
+            map_model("claude-haiku-4-5-20251001", deepseek_1m_provider),
             "deepseek-v4-flash",
         )
 
@@ -941,6 +958,7 @@ class ProviderConfigTests(unittest.TestCase):
             "keys": {
                 "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
                 "inferenceModels": '[{"name":"deepseek-v4-pro[1m]","supports1m":true},{"name":"deepseek-v4-flash","supports1m":true}]',
+                "coworkEgressAllowedHosts": '["*"]',
             },
         }
         raw_health = _desktop_health(raw_status, 18080, provider)
@@ -954,6 +972,7 @@ class ProviderConfigTests(unittest.TestCase):
             "keys": {
                 "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
                 "inferenceModels": '[{"name":"claude-opus-4-7","supports1m":true},{"name":"claude-opus-4-6","supports1m":true},{"name":"claude-sonnet-4-6","supports1m":true},{"name":"claude-sonnet-4-5","supports1m":true},{"name":"claude-haiku-4-5","supports1m":true}]',
+                "coworkEgressAllowedHosts": '["*"]',
             },
         }
         stale_health = _desktop_health(stale_status, 18080, provider)
@@ -967,6 +986,7 @@ class ProviderConfigTests(unittest.TestCase):
             "keys": {
                 "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
                 "inferenceModels": registry.serialize_inference_models(provider),
+                "coworkEgressAllowedHosts": '["*"]',
             },
         }
 
@@ -974,6 +994,17 @@ class ProviderConfigTests(unittest.TestCase):
 
         self.assertFalse(current_health["needsApply"])
         self.assertTrue(current_health["oneMillionReady"])
+
+        missing_egress = _desktop_health({
+            "configured": True,
+            "keys": {
+                "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                "inferenceModels": registry.serialize_inference_models(provider),
+            },
+        }, 18080, provider)
+        missing_egress_codes = {issue["code"] for issue in missing_egress["issues"]}
+        self.assertTrue(missing_egress["needsApply"])
+        self.assertIn("cowork_egress_hosts_missing", missing_egress_codes)
 
     def test_desktop_health_detects_capability_based_1m_models(self):
         provider = {
@@ -997,6 +1028,7 @@ class ProviderConfigTests(unittest.TestCase):
             "keys": {
                 "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
                 "inferenceModels": '[{"name":"claude-sonnet-4-6"},{"name":"claude-haiku-4-5"}]',
+                "coworkEgressAllowedHosts": '["*"]',
             },
         }, 18080, provider)
 
@@ -1005,6 +1037,7 @@ class ProviderConfigTests(unittest.TestCase):
             "keys": {
                 "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
                 "inferenceModels": registry.serialize_inference_models(provider),
+                "coworkEgressAllowedHosts": '["*"]',
             },
         }, 18080, provider)
 
@@ -1974,7 +2007,7 @@ class AdminApiTests(unittest.TestCase):
 
 
 class ReleaseManifestTests(unittest.TestCase):
-    VERSION = "1.0.21"
+    VERSION = "1.0.22"
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -2083,7 +2116,10 @@ class ReleaseManifestTests(unittest.TestCase):
         installer = (self.root / "installer.nsi").read_text(encoding="utf-8")
 
         self.assertIn('tag_sha="$(git rev-list -n 1 "$tag")"', workflow)
-        self.assertGreaterEqual(workflow.count("ref: ${{ needs.prepare.outputs.tag }}"), 4)
+        self.assertIn("dry_run:", workflow)
+        self.assertIn("checkout_ref: ${{ steps.release.outputs.checkout_ref }}", workflow)
+        self.assertGreaterEqual(workflow.count("ref: ${{ needs.prepare.outputs.checkout_ref }}"), 4)
+        self.assertIn("Upload dry-run release staging", workflow)
         self.assertIn("build_macos_intel:", workflow)
         self.assertIn("runs-on: macos-15-intel", workflow)
         self.assertIn("macOS-x64.pkg", workflow)
@@ -2328,6 +2364,7 @@ class ProxyConversionTests(unittest.TestCase):
         self.assertEqual(map_model("deepseek-v4-pro[1m]", provider), "deepseek-v4-pro[1m]")
         self.assertEqual(map_model("claude-sonnet-4-6", provider), "deepseek-v4-pro[1m]")
         self.assertEqual(map_model("claude-haiku-4-5", provider), "deepseek-v4-flash")
+        self.assertEqual(map_model("claude-haiku-4-5-20251001", provider), "deepseek-v4-flash")
         self.assertEqual(map_model("claude-sonnet-4-5", provider), "claude-sonnet-4-5")
 
     def test_map_model_routes_safe_custom_claude_model_names(self):
@@ -2416,6 +2453,46 @@ class ProxyConversionTests(unittest.TestCase):
 
         self.assertEqual(result["thinking"], {"type": "enabled"})
         self.assertEqual(result["output_config"]["effort"], "low")
+
+    def test_non_official_deepseek_named_provider_does_not_inject_max_options(self):
+        provider = {
+            "name": "opencode deepseek",
+            "baseUrl": "https://opencode.ai/zen/go/v1",
+            "requestOptions": {
+                "anthropic": {
+                    "thinking": {"type": "enabled"},
+                    "output_config": {"effort": "max"},
+                }
+            },
+        }
+        body = {
+            "model": "claude-sonnet-4-6",
+            "thinking": {"type": "enabled"},
+        }
+
+        result = apply_anthropic_request_options(body, provider)
+
+        self.assertNotIn("thinking", result)
+        self.assertNotIn("output_config", result)
+
+    def test_explicit_deepseek_max_compatible_provider_injects_max_options(self):
+        provider = {
+            "name": "Private DeepSeek Gateway",
+            "baseUrl": "https://example.test/anthropic",
+            "supportsDeepSeekMax": True,
+            "requestOptions": {
+                "anthropic": {
+                    "thinking": {"type": "enabled"},
+                    "output_config": {"effort": "max"},
+                }
+            },
+        }
+        body = {"model": "claude-sonnet-4-6"}
+
+        result = apply_anthropic_request_options(body, provider)
+
+        self.assertEqual(result["thinking"], {"type": "enabled"})
+        self.assertEqual(result["output_config"]["effort"], "max")
 
     def test_non_deepseek_request_options_keep_legacy_thinking_strip(self):
         provider = {
@@ -2965,6 +3042,46 @@ class ProxyAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["type"], "invalid_request_error")
         self.assertIn("未在 CC Desktop Switch 中映射", response.json()["error"]["message"])
+
+    def test_messages_endpoint_accepts_internal_dated_haiku_route_when_slot_is_mapped(self):
+        cfg.add_provider({
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "apiKey": "secret-key",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {
+                "haiku": "deepseek-v4-flash",
+                "default": "deepseek-v4-pro",
+            },
+        })
+        cfg.save_config({**cfg.load_config(), "gatewayApiKey": "local-gateway-key"})
+        observed = {}
+
+        async def fake_forward_request(body, _provider, _request_id):
+            observed["model"] = body["model"]
+            return {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": body["model"],
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+        with patch("backend.proxy.forward_request", fake_forward_request):
+            response = self.client.post(
+                "/v1/messages",
+                headers={"authorization": "Bearer local-gateway-key"},
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 8,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["model"], "deepseek-v4-flash")
 
     def test_messages_endpoint_returns_upstream_error_status(self):
         cfg.add_provider({

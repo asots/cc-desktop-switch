@@ -218,9 +218,10 @@ async def fetch_provider_models(provider: dict) -> dict:
 
 
 def _provider_kind(provider: dict) -> str:
-    probe = f"{provider.get('name', '')} {provider.get('baseUrl', '')}".lower()
-    if "deepseek" in probe:
+    host = urlsplit(str(provider.get("baseUrl") or "")).netloc.lower()
+    if host == "api.deepseek.com":
         return "deepseek"
+    probe = f"{provider.get('name', '')} {provider.get('baseUrl', '')}".lower()
     if "siliconflow" in probe:
         return "siliconflow"
     if "openrouter" in probe:

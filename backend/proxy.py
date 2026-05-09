@@ -80,8 +80,13 @@ def _is_unmapped_desktop_route(model_id: str, provider: Optional[dict]) -> bool:
         return False
     if requested in provider_model_ids(provider):
         return False
-    if requested not in set(desktop_route_ids()) and not resolve_requested_model_slot(requested):
+    mapped_slot = resolve_requested_model_slot(requested)
+    if requested not in set(desktop_route_ids()) and not mapped_slot:
         return False
+    if mapped_slot:
+        models_config = model_mappings_with_legacy_aliases((provider or {}).get("models", {}))
+        if models_config.get(mapped_slot):
+            return False
     return requested not in _configured_desktop_route_names(provider)
 
 
@@ -242,9 +247,10 @@ def get_upstream_headers(provider: dict) -> dict:
 
 def _provider_kind(provider: dict) -> str:
     """用名称和 URL 粗略判断提供商，用于处理厂商私有参数。"""
-    probe = f"{provider.get('name', '')} {provider.get('baseUrl', '')}".lower()
-    if "deepseek" in probe:
+    host = urlsplit(str(provider.get("baseUrl") or "")).netloc.lower()
+    if provider.get("supportsDeepSeekMax") is True or host == "api.deepseek.com":
         return "deepseek"
+    probe = f"{provider.get('name', '')} {provider.get('baseUrl', '')}".lower()
     if "moonshot" in probe or "kimi" in probe:
         return "kimi"
     if "bigmodel" in probe or "zhipu" in probe or "glm" in probe:
@@ -770,7 +776,7 @@ def _get_http_proxy() -> Optional[str]:
 
 def create_proxy_app() -> FastAPI:
     """创建代理 FastAPI 应用"""
-    app = FastAPI(title="CC Desktop Switch Proxy", version="1.0.21")
+    app = FastAPI(title="CC Desktop Switch Proxy", version="1.0.22")
 
     def upstream_error_status(result: dict) -> int:
         """把上游错误转换成 HTTP 错误状态，避免桌面端按成功响应解析。"""
