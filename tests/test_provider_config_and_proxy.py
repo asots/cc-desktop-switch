@@ -1006,6 +1006,33 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertTrue(missing_egress["needsApply"])
         self.assertIn("cowork_egress_hosts_missing", missing_egress_codes)
 
+    def test_desktop_health_allows_safe_routes_that_match_upstream_model_ids(self):
+        provider = {
+            "baseUrl": "https://example-gateway.test/v1",
+            "authScheme": "bearer",
+            "apiFormat": "openai_chat",
+            "models": {
+                "default": "claude-opus-4-7",
+                "opus_4_7": "claude-opus-4-7",
+                "sonnet_4_6": "claude-opus-4-7",
+                "haiku_4_5": "claude-opus-4-7",
+            },
+        }
+        status = {
+            "configured": True,
+            "keys": {
+                "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                "inferenceModels": registry.serialize_inference_models(provider),
+                "coworkEgressAllowedHosts": '["*"]',
+            },
+        }
+
+        health = _desktop_health(status, 18080, provider, [provider])
+        codes = {issue["code"] for issue in health["issues"]}
+
+        self.assertFalse(health["needsApply"])
+        self.assertNotIn("invalid_inference_model_names", codes)
+
     def test_desktop_health_detects_capability_based_1m_models(self):
         provider = {
             "baseUrl": "https://dashscope.aliyuncs.com/apps/anthropic",

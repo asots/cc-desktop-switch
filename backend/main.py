@@ -370,7 +370,12 @@ def _inference_model_names(items: list) -> list[str]:
     return names
 
 
-def _raw_desktop_model_names(names: list[str], provider: Optional[dict], providers: Optional[list[dict]]) -> list[str]:
+def _raw_desktop_model_names(
+    names: list[str],
+    provider: Optional[dict],
+    providers: Optional[list[dict]],
+    target_models: Optional[list] = None,
+) -> list[str]:
     """识别旧版本写入的真实上游模型名。"""
     suspicious_tokens = (
         "deepseek",
@@ -383,12 +388,19 @@ def _raw_desktop_model_names(names: list[str], provider: Optional[dict], provide
         "siliconflow",
         "mimo",
     )
+    safe_route_names = {
+        str(item.get("name"))
+        for item in target_models or []
+        if isinstance(item, dict) and item.get("name")
+    }
     upstream_ids = set(provider_model_ids(provider))
     for item in providers or []:
         upstream_ids.update(provider_model_ids(item))
 
     raw_names = []
     for name in names:
+        if name in safe_route_names:
+            continue
         lowered = name.lower()
         if name in upstream_ids or any(token in lowered for token in suspicious_tokens):
             raw_names.append(name)
@@ -490,14 +502,14 @@ def _desktop_health(
 
     inference_models = _parse_inference_models(str(keys.get("inferenceModels") or ""))
     inference_model_names = _inference_model_names(inference_models)
-    raw_model_names = _raw_desktop_model_names(inference_model_names, provider, providers)
+    target_models = registry.provider_inference_models(provider)
+    raw_model_names = _raw_desktop_model_names(inference_model_names, provider, providers, target_models)
     if raw_model_names:
         issues.append({
             "code": "invalid_inference_model_names",
             "message": "Claude 桌面版配置里仍有第三方真实模型名，请重新一键应用到 Claude 桌面版。",
             "models": raw_model_names,
         })
-    target_models = registry.provider_inference_models(provider)
     stale_route_names = _stale_desktop_route_names(inference_model_names, target_models)
     if stale_route_names:
         issues.append({
