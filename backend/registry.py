@@ -750,18 +750,23 @@ def _mac_get_config_status() -> dict:
     if library_has_runtime_config:
         keys = dict(library_status.get("keys") or {})
         configured = library_status.get("configured", False)
+        active_source = "configLibrary"
+        key_sources = {name: "configLibrary" for name in keys}
     else:
         keys = dict(plist_status.get("keys") or {})
+        key_sources = {name: "plist" for name in keys}
         for name, value in (json_status.get("keys") or {}).items():
-            if name == "inferenceModels" and keys.get("inferenceModels"):
-                continue
             keys[name] = value
+            key_sources[name] = "json"
         configured = json_status.get("configured", False) if json_has_runtime_config else plist_status.get("configured", False)
+        active_source = "json" if json_has_runtime_config else ("plist" if keys else "")
 
     return {
         "configured": configured,
         "keys": keys,
         "message": library_status.get("message") or json_status.get("message") or plist_status.get("message", ""),
+        "activeSource": active_source,
+        "keySources": key_sources,
         "sources": {
             "plist": plist_status.get("configured", False),
             "json": json_status.get("configured", False),

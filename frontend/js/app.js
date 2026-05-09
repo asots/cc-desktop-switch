@@ -205,17 +205,52 @@
     });
   }
 
-  function firstHealthMessage(health) {
-    return health?.issues?.[0]?.message || "";
+  function compactList(items, maxItems = 4) {
+    if (!Array.isArray(items) || !items.length) return "";
+    const shown = items.slice(0, maxItems).map((item) => String(item || "").trim()).filter(Boolean);
+    if (!shown.length) return "";
+    const suffix = items.length > maxItems ? ` 等 ${items.length} 项` : "";
+    return `${shown.join("、")}${suffix}`;
+  }
+
+  function healthIssueMessage(issue, health = {}) {
+    if (!issue) return "";
+    let message = issue.message || "";
+    const models = compactList(issue.models);
+    const writtenModels = compactList(issue.writtenModels);
+    if (issue.code === "gateway_base_url_mismatch") {
+      const expected = health.expectedBaseUrl || "";
+      const actual = health.actualBaseUrl || "";
+      if (expected || actual) {
+        message += ` 当前: ${actual || "未读取到"}；期望: ${expected || "未读取到"}`;
+      }
+    } else if (issue.code === "one_million_not_written") {
+      if (models) message += ` 期望 1M: ${models}`;
+      if (writtenModels) message += `；已读回 1M: ${writtenModels}`;
+    } else if (models) {
+      message += ` 模型: ${models}`;
+    }
+    return message;
+  }
+
+  function healthMessages(health) {
+    const issues = Array.isArray(health?.issues) ? health.issues : [];
+    return issues.map((issue) => healthIssueMessage(issue, health)).filter(Boolean);
+  }
+
+  function displayConfigValue(value) {
+    if (Array.isArray(value)) return JSON.stringify(value);
+    const text = String(value ?? "").trim();
+    return text || "未读取到";
   }
 
   function renderDesktopHealthWarning(selector, health) {
     const warning = $(selector);
     if (!warning) return;
-    const message = firstHealthMessage(health);
-    warning.hidden = !message;
+    const messages = healthMessages(health);
+    warning.hidden = !messages.length;
     const text = $("span", warning);
-    if (text) text.textContent = message;
+    if (text) text.textContent = messages.join("\n");
   }
 
   function renderUpdateBadge(result) {
@@ -1412,7 +1447,7 @@
     $(".desktop-card .circle-check")?.classList.toggle("warning", !desktopReady);
     renderDesktopHealthWarning("#desktopPageWarning", health);
     $("#desktopConfigList").innerHTML = entries.map(([key, value]) => `
-      <div class="config-row"><i class="bi bi-check-circle-fill"></i><span>${escapeHtml(key)}:</span><code>${escapeHtml(Array.isArray(value) ? JSON.stringify(value) : value)}</code></div>
+      <div class="config-row"><i class="bi bi-check-circle-fill"></i><span>${escapeHtml(key)}:</span><code>${escapeHtml(displayConfigValue(value))}</code></div>
     `).join("");
     $("#desktopJson").textContent = JSON.stringify(desktop.config, null, 2);
   }

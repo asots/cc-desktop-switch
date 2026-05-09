@@ -537,7 +537,9 @@ def _desktop_health(
         if not one_million_ready:
             issues.append({
                 "code": "one_million_not_written",
-                "message": "1M 上下文模型尚未写入桌面版配置，请重新一键应用并重启 Claude 桌面版。",
+                "message": "Claude Desktop 模型菜单的 1M 标记尚未写入或未被读回；后台转发可能已路由到 1M 模型，请重新一键应用并重启 Claude 桌面版。",
+                "models": one_million_models,
+                "writtenModels": sorted(written_one_million),
             })
 
     return {

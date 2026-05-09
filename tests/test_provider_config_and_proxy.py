@@ -483,7 +483,7 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertIs(saved["isClaudeCodeForDesktopEnabled"], True)
         self.assertEqual(saved["coworkEgressAllowedHosts"], ["*"])
 
-    def test_macos_status_prefers_json_runtime_values_and_keeps_plist_models(self):
+    def test_macos_status_prefers_json_runtime_values_over_stale_plist_models(self):
         json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         with open(json_path, "w", encoding="utf-8") as handle:
@@ -493,11 +493,11 @@ class ProviderConfigTests(unittest.TestCase):
                     "inferenceProvider": "gateway",
                     "inferenceGatewayBaseUrl": "https://stale.example",
                     "inferenceGatewayApiKey": "secret-value",
-                    "inferenceModels": ["model-a"],
+                    "inferenceModels": [{"name": "json-model", "supports1m": True}],
                 },
             }, handle)
 
-        plist_models = '[{"name":"model-a","displayName":"model-a","supports1m":true}]'
+        plist_models = '["old-plist-model"]'
         with patch.object(registry, "MAC_3P_CONFIG", json_path):
             with patch("backend.registry._mac_get_plist_config_status", return_value={
                 "configured": True,
@@ -514,7 +514,9 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertTrue(status["configured"])
         self.assertEqual(status["keys"]["inferenceGatewayBaseUrl"], "https://stale.example")
         self.assertEqual(status["keys"]["inferenceGatewayApiKey"], "******")
-        self.assertEqual(status["keys"]["inferenceModels"], plist_models)
+        self.assertEqual(status["keys"]["inferenceModels"], '[{"name":"json-model","supports1m":true}]')
+        self.assertEqual(status["activeSource"], "json")
+        self.assertEqual(status["keySources"]["inferenceModels"], "json")
         self.assertTrue(status["sources"]["plist"])
         self.assertTrue(status["sources"]["json"])
         self.assertFalse(status["sources"]["configLibrary"])
@@ -564,9 +566,66 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(status["keys"]["inferenceGatewayBaseUrl"], "https://library.example")
         self.assertEqual(status["keys"]["inferenceGatewayApiKey"], "******")
         self.assertEqual(status["keys"]["inferenceModels"], '["library-model"]')
+        self.assertEqual(status["activeSource"], "configLibrary")
+        self.assertEqual(status["keySources"]["inferenceModels"], "configLibrary")
         self.assertTrue(status["sources"]["plist"])
         self.assertTrue(status["sources"]["json"])
         self.assertTrue(status["sources"]["configLibrary"])
+
+    def test_macos_json_1m_status_does_not_warn_when_plist_models_are_stale(self):
+        provider = {
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {
+                "default": "deepseek-v4-pro[1m]",
+                "opus": "deepseek-v4-pro[1m]",
+                "sonnet": "deepseek-v4-pro[1m]",
+                "haiku": "deepseek-v4-flash",
+            },
+            "modelCapabilities": {
+                "deepseek-v4-pro[1m]": {"supports1m": True},
+                "deepseek-v4-flash": {"supports1m": True},
+            },
+        }
+        json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "deploymentMode": "3p",
+                "enterpriseConfig": {
+                    "inferenceProvider": "gateway",
+                    "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                    "inferenceGatewayApiKey": "secret-value",
+                    "inferenceGatewayAuthScheme": "bearer",
+                    "inferenceModels": json.loads(registry.serialize_inference_models(provider)),
+                    "coworkEgressAllowedHosts": ["*"],
+                },
+            }, handle)
+
+        with patch.object(registry, "MAC_3P_CONFIG", json_path):
+            with patch("backend.registry._mac_get_plist_config_status", return_value={
+                "configured": True,
+                "keys": {
+                    "inferenceProvider": "gateway",
+                    "inferenceGatewayBaseUrl": "http://127.0.0.1:18080",
+                    "inferenceGatewayApiKey": "******",
+                    "inferenceGatewayAuthScheme": "bearer",
+                    "inferenceModels": '["sonnet","haiku","opus"]',
+                    "coworkEgressAllowedHosts": '["*"]',
+                },
+                "message": "",
+            }):
+                status = registry._mac_get_config_status()
+
+        health = _desktop_health(status, 18080, provider)
+        codes = {issue["code"] for issue in health["issues"]}
+
+        self.assertEqual(status["activeSource"], "json")
+        self.assertEqual(status["keySources"]["inferenceModels"], "json")
+        self.assertFalse(health["needsApply"])
+        self.assertTrue(health["oneMillionReady"])
+        self.assertNotIn("one_million_not_written", codes)
 
     def test_macos_clear_config_clears_json_without_touching_preferences(self):
         json_path = os.path.join(self.temp_dir.name, "Claude-3p", "claude_desktop_config.json")
@@ -3488,6 +3547,11 @@ class StaticFrontendTests(unittest.TestCase):
         self.assertIn("capabilitiesMatch", app_js)
         self.assertIn("reorderProviders", api_js)
         self.assertIn("desktopHealth", app_js + api_js)
+        self.assertIn("healthMessages", app_js)
+        self.assertIn("healthIssueMessage", app_js)
+        self.assertIn("activeSource", api_js)
+        self.assertIn("keySources", api_js)
+        self.assertNotIn("registryConfig.inferenceGatewayBaseUrl || `http://127.0.0.1:${proxyPort}`", api_js)
         self.assertIn("modelCapabilities", app_js + api_js)
         self.assertIn("requestOptions", app_js + api_js)
         self.assertIn("white-space: pre-line", css)

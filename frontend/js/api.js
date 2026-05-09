@@ -251,18 +251,21 @@
 
     async getDesktopStatus() {
       const data = await api('GET', '/api/desktop/status');
-      const status = await api('GET', '/api/status');
-      const proxyPort = status.proxyPort || 18080;
       const registryConfig = data.keys || {};
       return {
         configured: !!data.configured,
+        message: data.message || '',
+        sources: data.sources || {},
+        activeSource: data.activeSource || '',
+        keySources: data.keySources || {},
+        exists: data.exists,
         health: data.health || { needsApply: false, issues: [] },
         config: {
-          inferenceProvider: registryConfig.inferenceProvider || 'gateway',
-          inferenceGatewayBaseUrl: registryConfig.inferenceGatewayBaseUrl || `http://127.0.0.1:${proxyPort}`,
+          inferenceProvider: registryConfig.inferenceProvider || '',
+          inferenceGatewayBaseUrl: registryConfig.inferenceGatewayBaseUrl || '',
           inferenceGatewayApiKey: registryConfig.inferenceGatewayApiKey ? '******' : '',
-          inferenceGatewayAuthScheme: registryConfig.inferenceGatewayAuthScheme || 'bearer',
-          inferenceModels: registryConfig.inferenceModels || '[]',
+          inferenceGatewayAuthScheme: registryConfig.inferenceGatewayAuthScheme || '',
+          inferenceModels: registryConfig.inferenceModels || '',
         },
       };
     },
