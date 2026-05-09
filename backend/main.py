@@ -296,6 +296,18 @@ def _diagnostics_checks(payload: dict) -> list[dict]:
     active_id = payload.get("activeProviderId")
     providers = payload.get("providers") or []
     active = next((provider for provider in providers if provider.get("id") == active_id), None)
+    recent_logs = payload.get("proxy", {}).get("recentLogs") or []
+    invalid_upstream_logs = [
+        item
+        for item in recent_logs
+        if "上游返回非 JSON" in str(item.get("message") or "")
+        or "invalid_upstream_response" in str(item.get("message") or "")
+    ]
+    recent_error_logs = [
+        item
+        for item in recent_logs
+        if str(item.get("level") or "").upper() == "ERROR"
+    ]
     checks.append({
         "code": "active_provider",
         "ok": bool(active),
@@ -323,6 +335,20 @@ def _diagnostics_checks(payload: dict) -> list[dict]:
         "ok": bool(payload.get("proxy", {}).get("running")),
         "message": "本机 gateway 正在运行" if payload.get("proxy", {}).get("running") else "本机 gateway 未运行",
     })
+    if invalid_upstream_logs:
+        checks.append({
+            "code": "upstream_response",
+            "ok": False,
+            "message": "最近转发日志显示上游返回了 HTML/非 JSON 响应，请检查 API 地址、API 格式、鉴权或中转防护页面。",
+            "count": len(invalid_upstream_logs),
+        })
+    elif recent_error_logs:
+        checks.append({
+            "code": "proxy_recent_errors",
+            "ok": False,
+            "message": "最近转发日志中存在错误记录，请打开转发状态查看详情；如果已处理，可先清除日志后重新运行诊断。",
+            "count": len(recent_error_logs),
+        })
     return checks
 
 

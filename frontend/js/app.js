@@ -1606,6 +1606,7 @@
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+    return filename;
   }
 
   async function refreshBackupList() {
@@ -2156,8 +2157,8 @@
         actionEl.disabled = true;
         try {
           const result = await CCApi.exportDiagnostics();
-          downloadJson(diagnosticsFilename(), result.diagnostics || result);
-          showToast(t("diagnostics.exported"));
+          const filename = downloadJson(diagnosticsFilename(), result.diagnostics || result);
+          showToast(formatI18n("diagnostics.exported", { filename }));
         } finally {
           actionEl.disabled = false;
         }

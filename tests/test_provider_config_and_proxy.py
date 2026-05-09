@@ -1631,6 +1631,35 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("******", serialized)
         self.assertEqual(check.status_code, 200)
         self.assertIn("checks", check.json())
+        self.assertFalse(check.json()["ok"])
+        check_codes = {item["code"] for item in check.json()["checks"]}
+        self.assertIn("proxy_recent_errors", check_codes)
+
+    def test_diagnostics_check_flags_recent_non_json_upstream_response(self):
+        provider = cfg.add_provider({
+            "name": "AnyRouter",
+            "baseUrl": "https://anyrouter.top/chat/completions",
+            "apiKey": "sk-live-secret123456",
+            "authScheme": "bearer",
+            "apiFormat": "openai_chat",
+            "models": {"sonnet": "claude-opus-4-7", "default": "claude-opus-4-7"},
+        })
+        config = cfg.load_config()
+        config["activeProvider"] = provider["id"]
+        cfg.save_config(config)
+        log_buffer.clear()
+        log_buffer.add(
+            "ERROR",
+            "上游返回非 JSON：HTTP 200, content-type=text/html; charset=utf-8, preview=<html><script>var arg1='abc'",
+        )
+
+        check = self.client.post("/api/diagnostics/check", headers=admin_headers())
+        payload = check.json()
+        codes = {item["code"] for item in payload["checks"]}
+
+        self.assertEqual(check.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertIn("upstream_response", codes)
 
     def test_autofill_models_route_updates_provider_mapping(self):
         provider = cfg.add_provider({
@@ -3654,6 +3683,7 @@ class StaticFrontendTests(unittest.TestCase):
         html = (self.root / "frontend" / "index.html").read_text(encoding="utf-8")
         app_js = (self.root / "frontend" / "js" / "app.js").read_text(encoding="utf-8")
         api_js = (self.root / "frontend" / "js" / "api.js").read_text(encoding="utf-8")
+        i18n = (self.root / "frontend" / "js" / "i18n.js").read_text(encoding="utf-8")
 
         self.assertIn('data-action="run-diagnostics"', html)
         self.assertIn('data-action="export-diagnostics"', html)
@@ -3661,6 +3691,8 @@ class StaticFrontendTests(unittest.TestCase):
         self.assertIn("exportDiagnostics", api_js)
         self.assertIn("checkDiagnostics", api_js)
         self.assertIn("renderDiagnosticsResult", app_js)
+        self.assertIn("formatI18n(\"diagnostics.exported\"", app_js)
+        self.assertIn("Download started: {filename}", i18n)
 
     def test_current_guides_do_not_use_old_desktop_gateway_wording(self):
         forbidden = [
