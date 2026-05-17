@@ -1,11 +1,14 @@
 import copy
 import asyncio
+import argparse
 import base64
+import importlib
 import json
 import os
 import re
 import shutil
 import sqlite3
+import socket
 import subprocess
 import tempfile
 import time
@@ -32,9 +35,11 @@ from main import (
     request_existing_instance_activate,
     run_browser_mode,
 )
+import main as app_main
 from backend import config as cfg
 from backend import ccswitch_import
 from backend import main as backend_main
+from backend import preset_loader
 from backend import provider_tools
 from backend import registry
 from backend import update as updater
@@ -53,6 +58,7 @@ from backend.proxy import (
     gateway_models_response,
     log_buffer,
     map_model,
+    rectify_claude_code_billing_header,
 )
 
 
@@ -127,6 +133,17 @@ class ProviderConfigTests(unittest.TestCase):
 
         self.assertEqual(updated["apiKey"], "new-key")
 
+    def test_load_config_accepts_utf8_bom(self):
+        config = copy.deepcopy(cfg.DEFAULT_CONFIG)
+        config["gatewayApiKey"] = "ccds_gateway_secret123456"
+
+        with open(cfg.CONFIG_FILE, "w", encoding="utf-8-sig") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+
+        loaded = cfg.load_config()
+
+        self.assertEqual(loaded["gatewayApiKey"], "ccds_gateway_secret123456")
+
     def test_backup_export_and_import_config(self):
         provider = cfg.add_provider({
             "name": "DeepSeek",
@@ -177,6 +194,27 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertNotEqual(second["id"], "same")
         self.assertEqual(len({p["id"] for p in cfg.get_providers()}), 2)
 
+    def test_config_dir_can_be_overridden_by_env(self):
+        override_dir = os.path.join(self.temp_dir.name, "nested", "..", "override-config")
+
+        with patch.dict(os.environ, {"CCDS_CONFIG_DIR": override_dir}, clear=False):
+            importlib.reload(cfg)
+
+        expected_dir = os.path.abspath(os.path.join(self.temp_dir.name, "override-config"))
+        self.assertEqual(cfg.CONFIG_DIR, expected_dir)
+        self.assertEqual(cfg.CONFIG_FILE, os.path.join(expected_dir, "config.json"))
+        self.assertEqual(cfg.BACKUP_DIR, os.path.join(expected_dir, "backups"))
+
+        cfg.CONFIG_DIR = self.temp_dir.name
+        cfg.CONFIG_FILE = os.path.join(self.temp_dir.name, "config.json")
+        cfg.BACKUP_DIR = os.path.join(self.temp_dir.name, "backups")
+        cfg.save_config(copy.deepcopy(cfg.DEFAULT_CONFIG))
+
+    def test_billing_header_rectifier_setting_defaults_to_enabled(self):
+        settings = cfg.get_settings()
+
+        self.assertTrue(settings["enableBillingHeaderRectifier"])
+
     def test_builtin_presets_include_expected_provider_urls(self):
         presets = {preset["id"]: preset for preset in cfg.get_presets()}
 
@@ -207,14 +245,23 @@ class ProviderConfigTests(unittest.TestCase):
 
         deepseek_1m = presets["deepseek"]["modelOptions"]["deepseek_1m"]
         self.assertEqual(deepseek_1m["models"]["sonnet"], "deepseek-v4-pro[1m]")
+        self.assertEqual(deepseek_1m["models"]["haiku"], "deepseek-v4-flash")
         self.assertEqual(deepseek_1m["models"]["opus"], "deepseek-v4-pro[1m]")
         self.assertEqual(deepseek_1m["models"]["default"], "deepseek-v4-pro[1m]")
         self.assertTrue(deepseek_1m["modelCapabilities"]["deepseek-v4-pro[1m]"]["supports1m"])
         self.assertTrue(deepseek_1m["modelCapabilities"]["deepseek-v4-flash"]["supports1m"])
         mimo_1m = presets["xiaomi-mimo-token-plan"]["modelOptions"]["mimo_1m"]
+        self.assertEqual(mimo_1m["models"]["sonnet"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_1m["models"]["haiku"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_1m["models"]["opus"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_1m["models"]["default"], "mimo-v2.5-pro")
         self.assertTrue(mimo_1m["modelCapabilities"]["mimo-v2.5-pro"]["supports1m"])
         self.assertTrue(mimo_1m["modelCapabilities"]["mimo-v2-pro"]["supports1m"])
         mimo_payg_1m = presets["xiaomi-mimo-payg"]["modelOptions"]["mimo_1m"]
+        self.assertEqual(mimo_payg_1m["models"]["sonnet"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_payg_1m["models"]["haiku"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_payg_1m["models"]["opus"], "mimo-v2.5-pro")
+        self.assertEqual(mimo_payg_1m["models"]["default"], "mimo-v2.5-pro")
         self.assertTrue(mimo_payg_1m["modelCapabilities"]["mimo-v2.5-pro"]["supports1m"])
         self.assertTrue(mimo_payg_1m["modelCapabilities"]["mimo-v2-pro"]["supports1m"])
         self.assertEqual(presets["xiaomi-mimo-token-plan"]["modelCapabilities"], {})
@@ -224,6 +271,68 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(deepseek_max["requestOptions"]["anthropic"]["thinking"]["type"], "enabled")
         self.assertIn("Low：更快更省", deepseek_max["description"])
         self.assertIn("未勾选则使用 Claude 当前默认配置", deepseek_max["description"])
+
+    def test_builtin_preset_loader_skips_invalid_schema_entries(self):
+        schema = {
+            "type": "object",
+            "required": ["id", "name", "baseUrl", "authScheme", "apiFormat", "models", "isBuiltin"],
+            "properties": {
+                "id": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1},
+                "baseUrl": {"type": "string"},
+                "authScheme": {"type": "string"},
+                "apiFormat": {"type": "string"},
+                "models": {
+                    "type": "object",
+                    "required": ["default"],
+                    "additionalProperties": {"type": "string"},
+                },
+                "isBuiltin": {"type": "boolean", "enum": [True]},
+            },
+            "additionalProperties": True,
+        }
+        valid_preset = {
+            "id": "valid",
+            "name": "Valid Preset",
+            "baseUrl": "https://example.com/anthropic",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {"default": "model-a", "sonnet": "model-a"},
+            "isBuiltin": True,
+        }
+        invalid_preset = {
+            "id": "invalid",
+            "baseUrl": "https://example.com/anthropic",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {"default": "model-b"},
+            "isBuiltin": True,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            presets_dir = Path(temp_dir)
+            (presets_dir / "schema.json").write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+            (presets_dir / "01-valid.json").write_text(json.dumps(valid_preset, ensure_ascii=False, indent=2), encoding="utf-8")
+            (presets_dir / "02-invalid.json").write_text(json.dumps(invalid_preset, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            with patch.object(preset_loader, "PRESETS_DIR", presets_dir), patch.object(preset_loader, "PRESET_SCHEMA_FILE", presets_dir / "schema.json"):
+                with self.assertLogs("backend.preset_loader", level="WARNING") as logs:
+                    presets = cfg.get_presets()
+
+        self.assertEqual([preset["id"] for preset in presets], ["valid"])
+        self.assertIn("02-invalid.json", "\n".join(logs.output))
+        self.assertIn("missing required field", "\n".join(logs.output))
+
+    def test_presets_api_returns_file_backed_presets(self):
+        client = TestClient(create_admin_app())
+
+        response = client.get("/api/presets", headers=admin_headers())
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["presets"])
+        self.assertEqual(payload["presets"][0]["id"], "deepseek")
+        self.assertIn("bailian", {preset["id"] for preset in payload["presets"]})
 
     def test_registry_inference_models_mark_deepseek_1m(self):
         provider = {
@@ -305,6 +414,32 @@ class ProviderConfigTests(unittest.TestCase):
 
         self.assertEqual(set(by_name), {"claude-sonnet-4-6"})
         self.assertTrue(by_name["claude-sonnet-4-6"]["supports1m"])
+        self.assertNotIn("mimo-v2.5-pro", by_name)
+
+    def test_registry_inference_models_mark_mimo_1m_for_option_mapped_slots(self):
+        provider = {
+            "models": {
+                "default": "mimo-v2.5-pro",
+                "sonnet": "mimo-v2.5-pro",
+                "haiku": "mimo-v2.5-pro",
+                "opus": "mimo-v2.5-pro",
+            },
+            "modelCapabilities": {
+                "mimo-v2.5-pro": {"supports1m": True},
+            },
+        }
+
+        models = registry.provider_inference_models(provider)
+        by_name = {item["name"]: item for item in models}
+
+        self.assertEqual(set(by_name), {
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        })
+        self.assertTrue(by_name["claude-opus-4-7"]["supports1m"])
+        self.assertTrue(by_name["claude-sonnet-4-6"]["supports1m"])
+        self.assertTrue(by_name["claude-haiku-4-5"]["supports1m"])
         self.assertNotIn("mimo-v2.5-pro", by_name)
 
     def test_registry_inference_models_mark_mimo_v2_pro_1m_only_for_mapped_routes(self):
@@ -1227,6 +1362,9 @@ class ProviderConfigTests(unittest.TestCase):
         warning_codes = {warning["code"] for warning in health["warnings"]}
         self.assertFalse(health["needsApply"])
         self.assertIn("claude_code_helper_missing", warning_codes)
+        warning = next(item for item in health["warnings"] if item["code"] == "claude_code_helper_missing")
+        self.assertEqual(warning["severity"], "info")
+        self.assertTrue(warning["diagnosticOnly"])
 
         helper_path = os.path.join(self.temp_dir.name, "claude.exe")
         Path(helper_path).write_text("placeholder", encoding="utf-8")
@@ -1781,7 +1919,8 @@ class AdminApiTests(unittest.TestCase):
             (
                 "Authorization: Bearer sk-log-secret123456 "
                 "url=https://example.test?token=query-secret-token&"
-                "access_token=log-access-secret&refresh_token=log-refresh-secret&client_secret=log-client-secret"
+                "access_token=log-access-secret&refresh_token=log-refresh-secret&client_secret=log-client-secret "
+                "中文诊断提示：本机 helper 仅作为提示信息"
             ),
         )
 
@@ -1810,6 +1949,8 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("log-refresh-secret", serialized)
         self.assertNotIn("log-client-secret", serialized)
         self.assertIn("******", serialized)
+        self.assertIn("中文诊断提示", serialized)
+        self.assertNotIn("ä¸­æ", serialized)
         self.assertEqual(check.status_code, 200)
         self.assertIn("checks", check.json())
         self.assertFalse(check.json()["ok"])
@@ -1819,6 +1960,10 @@ class AdminApiTests(unittest.TestCase):
     def test_diagnostics_export_redacts_socks_proxy_credentials(self):
         log_buffer.clear()
         log_buffer.add("INFO", "使用上游代理: socks5://proxy-user:proxy-pass@127.0.0.1:1080")
+        cfg.update_settings({
+            "upstreamProxyEnabled": True,
+            "upstreamProxy": "socks5://proxy-user:proxy-pass@127.0.0.1:1080",
+        })
 
         allowed = self.client.post("/api/diagnostics/export", headers=admin_headers())
         payload = allowed.json()["diagnostics"]
@@ -1828,6 +1973,8 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("proxy-user", serialized)
         self.assertNotIn("proxy-pass", serialized)
         self.assertIn("socks5://******:******@127.0.0.1:1080", serialized)
+        self.assertEqual(payload["settings"]["upstreamProxy"]["host"], "127.0.0.1")
+        self.assertEqual(payload["settings"]["upstreamProxy"]["port"], 1080)
 
     def test_diagnostics_check_flags_recent_non_json_upstream_response(self):
         provider = cfg.add_provider({
@@ -1854,6 +2001,31 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(check.status_code, 200)
         self.assertFalse(payload["ok"])
         self.assertIn("upstream_response", codes)
+
+    def test_diagnostics_check_flags_unreachable_local_upstream_proxy(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cfg.update_settings({
+            "upstreamProxyEnabled": True,
+            "upstreamProxy": f"socks5://proxy-user:proxy-pass@127.0.0.1:{port}",
+        })
+
+        check = self.client.post("/api/diagnostics/check", headers=admin_headers())
+        payload = check.json()
+        serialized = json.dumps(payload, ensure_ascii=False)
+        proxy_check = next(
+            item for item in payload["checks"]
+            if item["code"] == "upstream_proxy_unreachable"
+        )
+
+        self.assertEqual(check.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(proxy_check["host"], "127.0.0.1")
+        self.assertEqual(proxy_check["port"], port)
+        self.assertNotIn("proxy-user", serialized)
+        self.assertNotIn("proxy-pass", serialized)
 
     def test_diagnostics_check_flags_missing_claude_code_helper(self):
         provider = cfg.add_provider({
@@ -1887,7 +2059,10 @@ class AdminApiTests(unittest.TestCase):
 
         self.assertEqual(check.status_code, 200)
         self.assertIn("claude_code_helper", codes)
+        helper_check = next(item for item in payload["checks"] if item["code"] == "claude_code_helper")
         self.assertTrue(desktop_check["ok"])
+        self.assertTrue(helper_check["ok"])
+        self.assertEqual(helper_check["level"], "info")
         self.assertFalse(payload["ok"])
 
     def test_autofill_models_route_updates_provider_mapping(self):
@@ -2475,7 +2650,7 @@ class AdminApiTests(unittest.TestCase):
 
 
 class ReleaseManifestTests(unittest.TestCase):
-    VERSION = "1.0.24"
+    VERSION = "1.0.25"
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -2523,6 +2698,15 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertIn("httpx[socks]", requirements)
         self.assertIn('"socksio"', build_spec)
         self.assertIn('"socksio"', macos_spec)
+
+    def test_build_metadata_includes_builtin_preset_data_files(self):
+        build_spec = (self.root / "build.spec").read_text(encoding="utf-8")
+        macos_spec = (self.root / "macos" / "build-macos.spec").read_text(encoding="utf-8")
+
+        self.assertIn('ROOT / "backend" / "presets"', build_spec)
+        self.assertIn('"backend/presets"', build_spec)
+        self.assertIn('ROOT / "backend" / "presets"', macos_spec)
+        self.assertIn('"backend/presets"', macos_spec)
 
     def _run_manifest(self):
         script = self.root / "scripts" / "New-ReleaseManifest.ps1"
@@ -2709,6 +2893,26 @@ class SingleInstanceStartupTests(unittest.TestCase):
         self.assertNotIn(admin_ui_url(18081), printed)
         self.assertNotIn(get_admin_token(), printed)
 
+    def test_main_reports_existing_instance_activation_in_console(self):
+        messages = []
+
+        def fake_safe_print(message):
+            messages.append(str(message))
+
+        with patch("main.parse_args", return_value=argparse.Namespace(browser=False, server_only=False, port=None)):
+            with patch("main.cfg.ensure_config_dir"):
+                with patch("main.cfg.get_settings", return_value={"adminPort": 18081, "proxyPort": 18080, "autoStart": False}):
+                    with patch("main.acquire_single_instance_lock", return_value=False):
+                        with patch("main.request_existing_instance_activate", return_value=True):
+                            with patch("main.safe_print", fake_safe_print):
+                                with patch("main.show_message_box") as message_box:
+                                    app_main.main()
+
+        printed = "\n".join(messages)
+        self.assertIn("已经在运行，正在尝试唤起现有窗口", printed)
+        self.assertIn("已唤起现有实例", printed)
+        message_box.assert_not_called()
+
 
 class ProxyConversionTests(unittest.TestCase):
     def test_build_upstream_url_accepts_base_url_or_full_endpoint(self):
@@ -2732,6 +2936,47 @@ class ProxyConversionTests(unittest.TestCase):
             build_upstream_url("https://api.moonshot.ai/v1/chat/completions", "openai"),
             "https://api.moonshot.ai/v1/chat/completions",
         )
+
+    def test_billing_header_rectifier_removes_system_string_header(self):
+        body = {
+            "model": "claude-sonnet-4-6",
+            "system": "x-anthropic-billing-header: dynamic-value\n\nKeep this system prompt.",
+            "messages": [
+                {"role": "user", "content": "x-anthropic-billing-header: do not touch user text"},
+            ],
+        }
+
+        removed = rectify_claude_code_billing_header(body)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(body["system"], "Keep this system prompt.")
+        self.assertIn("x-anthropic-billing-header", body["messages"][0]["content"])
+
+    def test_billing_header_rectifier_removes_only_matching_system_text_blocks(self):
+        body = {
+            "system": [
+                {"type": "text", "text": "x-ahthropic-billing-header: dynamic-value"},
+                {"type": "text", "text": "Keep this block."},
+                {"type": "image", "source": {"type": "base64", "data": "abc"}},
+            ],
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        removed = rectify_claude_code_billing_header(body)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(body["system"], [
+            {"type": "text", "text": "Keep this block."},
+            {"type": "image", "source": {"type": "base64", "data": "abc"}},
+        ])
+
+    def test_billing_header_rectifier_can_be_disabled(self):
+        body = {"system": "x-anthropic-billing-header: dynamic-value"}
+
+        removed = rectify_claude_code_billing_header(body, enabled=False)
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(body["system"], "x-anthropic-billing-header: dynamic-value")
 
     def test_anthropic_to_openai_body_flattens_text_blocks_without_mutating_input(self):
         body = {
@@ -3164,6 +3409,45 @@ class ProxyConversionTests(unittest.TestCase):
 
         self.assertEqual(result["error"]["type"], "socks_proxy_dependency_missing")
         self.assertIn("SOCKS", result["error"]["message"])
+
+    def test_connect_error_mentions_configured_upstream_proxy(self):
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *args, **kwargs):
+                raise httpx.ConnectError("All connection attempts failed")
+
+        provider = {
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "apiKey": "provider-key",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+        }
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 8,
+        }
+
+        with patch("backend.proxy.get_settings", return_value={
+            "upstreamProxyEnabled": True,
+            "upstreamProxy": "socks5://proxy-user:proxy-pass@127.0.0.1:1080",
+        }):
+            with patch("backend.proxy.httpx.AsyncClient", FakeClient):
+                result = asyncio.run(forward_request(body, provider, "req-connect-proxy"))
+
+        self.assertEqual(result["error"]["type"], "connection_error")
+        self.assertIn("通过上游代理", result["error"]["message"])
+        self.assertIn("127.0.0.1:1080", result["error"]["message"])
+        self.assertNotIn("proxy-pass", result["error"]["message"])
 
     def test_socks_proxy_dependency_error_streams_as_error_event(self):
         class FakeClient:
@@ -3610,6 +3894,89 @@ class ProxyAppTests(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 401)
+
+    def test_messages_endpoint_rectifies_claude_code_billing_header(self):
+        cfg.add_provider({
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "apiKey": "secret-key",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {"sonnet": "deepseek-v4-pro", "default": "deepseek-v4-pro"},
+        })
+        cfg.save_config({**cfg.load_config(), "gatewayApiKey": "local-gateway-key"})
+        observed = {}
+
+        async def fake_forward_request(body, _provider, _request_id):
+            observed["body"] = copy.deepcopy(body)
+            return {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": body["model"],
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+        with patch("backend.proxy.forward_request", fake_forward_request):
+            response = self.client.post(
+                "/v1/messages",
+                headers={"authorization": "Bearer local-gateway-key"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "system": [
+                        {"type": "text", "text": "x-anthropic-billing-header: dynamic-value"},
+                        {"type": "text", "text": "Keep this system prompt."},
+                    ],
+                    "messages": [
+                        {"role": "user", "content": "x-anthropic-billing-header: keep user text"},
+                    ],
+                    "max_tokens": 8,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["body"]["system"], [{"type": "text", "text": "Keep this system prompt."}])
+        self.assertIn("x-anthropic-billing-header", observed["body"]["messages"][0]["content"])
+
+    def test_messages_endpoint_keeps_billing_header_when_rectifier_is_disabled(self):
+        cfg.add_provider({
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "apiKey": "secret-key",
+            "authScheme": "bearer",
+            "apiFormat": "anthropic",
+            "models": {"sonnet": "deepseek-v4-pro", "default": "deepseek-v4-pro"},
+        })
+        cfg.save_config({**cfg.load_config(), "gatewayApiKey": "local-gateway-key"})
+        cfg.update_settings({"enableBillingHeaderRectifier": False})
+        observed = {}
+
+        async def fake_forward_request(body, _provider, _request_id):
+            observed["body"] = copy.deepcopy(body)
+            return {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": body["model"],
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+        with patch("backend.proxy.forward_request", fake_forward_request):
+            response = self.client.post(
+                "/v1/messages",
+                headers={"authorization": "Bearer local-gateway-key"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "system": "x-anthropic-billing-header: dynamic-value",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 8,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["body"]["system"], "x-anthropic-billing-header: dynamic-value")
 
     def test_messages_endpoint_rejects_unmapped_claude_route(self):
         cfg.add_provider({
@@ -4161,6 +4528,10 @@ class StaticFrontendTests(unittest.TestCase):
         self.assertIn("checkDiagnostics", api_js)
         self.assertIn("renderDiagnosticsResult", app_js)
         self.assertIn("formatI18n(\"diagnostics.exported\"", app_js)
+        self.assertIn('warning?.diagnosticOnly !== true', app_js)
+        self.assertIn("settingsBillingHeaderRectifier", html + app_js)
+        self.assertIn("enableBillingHeaderRectifier", app_js)
+        self.assertIn("application/json;charset=utf-8", app_js)
         self.assertIn("Download started: {filename}", i18n)
 
     def test_current_guides_do_not_use_old_desktop_gateway_wording(self):

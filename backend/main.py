@@ -223,6 +223,64 @@ def _safe_url_parts(url: str) -> dict:
     }
 
 
+def _normalize_proxy_url(value: str) -> str:
+    """把用户填写的上游代理地址整理成 urlparse 可解析的形式。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        return f"http://{text}"
+    return text
+
+
+def _is_local_proxy_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower().strip("[]")
+    return normalized == "localhost" or normalized == "::1" or normalized.startswith("127.")
+
+
+def _check_local_proxy_reachable(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
+def _upstream_proxy_diagnostics(settings: dict) -> dict:
+    """返回不含凭据的上游代理诊断信息。"""
+    raw_value = str(settings.get("upstreamProxy") or "").strip()
+    result = {
+        "enabled": bool(settings.get("upstreamProxyEnabled")),
+        "configured": bool(raw_value),
+        "value": REDACTED if raw_value else "",
+        "scheme": "",
+        "host": "",
+        "port": None,
+        "isLocal": False,
+        "reachable": None,
+    }
+    if not raw_value:
+        return result
+
+    try:
+        parsed = urlparse(_normalize_proxy_url(raw_value))
+        port = parsed.port
+    except ValueError:
+        result["parseError"] = "invalid_proxy_url"
+        return result
+
+    host = parsed.hostname or ""
+    result.update({
+        "scheme": parsed.scheme,
+        "host": host,
+        "port": port,
+        "isLocal": _is_local_proxy_host(host),
+    })
+    if result["enabled"] and result["isLocal"] and port:
+        result["reachable"] = _check_local_proxy_reachable(host, port)
+    return result
+
+
 def _diagnostics_provider(provider: dict) -> dict:
     models = provider.get("models") if isinstance(provider.get("models"), dict) else {}
     return {
@@ -274,10 +332,7 @@ def _diagnostics_payload() -> dict:
         "activeProviderId": active.get("id") if active else None,
         "settings": {
             "autoStart": bool(settings.get("autoStart")),
-            "upstreamProxy": {
-                "enabled": bool(settings.get("upstreamProxyEnabled")),
-                "value": "******" if settings.get("upstreamProxy") else "",
-            },
+            "upstreamProxy": _upstream_proxy_diagnostics(settings),
         },
         "proxy": {
             "running": bool(_proxy_running),
@@ -343,7 +398,8 @@ def _diagnostics_checks(payload: dict) -> list[dict]:
     if helper_warnings:
         checks.append({
             "code": "claude_code_helper",
-            "ok": False,
+            "ok": True,
+            "level": "info",
             "message": helper_warnings[0].get("message") or "Claude Desktop 本地 helper 不可用",
         })
     checks.append({
@@ -351,6 +407,25 @@ def _diagnostics_checks(payload: dict) -> list[dict]:
         "ok": bool(payload.get("proxy", {}).get("running")),
         "message": "本机 gateway 正在运行" if payload.get("proxy", {}).get("running") else "本机 gateway 未运行",
     })
+    upstream_proxy = payload.get("settings", {}).get("upstreamProxy") or {}
+    if (
+        upstream_proxy.get("enabled")
+        and upstream_proxy.get("configured")
+        and upstream_proxy.get("isLocal")
+        and upstream_proxy.get("reachable") is False
+    ):
+        host = upstream_proxy.get("host") or "127.0.0.1"
+        port = upstream_proxy.get("port") or ""
+        checks.append({
+            "code": "upstream_proxy_unreachable",
+            "ok": False,
+            "message": (
+                f"上游代理已开启，但 {host}:{port} 不可连接。"
+                "请启动该代理，或在设置里关闭上游代理后重试。"
+            ),
+            "host": host,
+            "port": port,
+        })
     if invalid_upstream_logs:
         checks.append({
             "code": "upstream_response",
@@ -585,6 +660,9 @@ def _desktop_health(
     if helper_status["enabled"] and not helper_status["available"]:
         warnings.append({
             "code": "claude_code_helper_missing",
+            "severity": "info",
+            "diagnosticOnly": True,
+            "checked": helper_status.get("checked", 0),
             "message": (
                 "Claude Desktop 的本地 Claude Code helper 尚未下载完成或被安全软件拦截。"
                 "如果桌面端提示 Host Claude Code binary not available，请检查 downloads.claude.ai 网络访问、"
@@ -873,7 +951,7 @@ async def _detect_local_proxy() -> Optional[str]:
 
 def create_admin_app() -> FastAPI:
     """创建管理后台 FastAPI 应用"""
-    app = FastAPI(title="CC Desktop Switch Admin", version="1.0.24")
+    app = FastAPI(title="CC Desktop Switch Admin", version="1.0.25")
 
     @app.middleware("http")
     async def require_local_admin_auth(request: Request, call_next):
